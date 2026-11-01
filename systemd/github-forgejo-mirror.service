@@ -1,0 +1,19 @@
+[Unit]
+Description=Discover GitHub repositories and provision Forgejo pull mirrors
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=github-forgejo-mirror
+Group=github-forgejo-mirror
+WorkingDirectory=/opt/github-forgejo-mirror
+EnvironmentFile=/etc/github-forgejo-mirror.env
+ExecStart=/opt/github-forgejo-mirror/.venv/bin/python /opt/github-forgejo-mirror/github_forgejo_mirror.py
+StateDirectory=github-forgejo-mirror
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

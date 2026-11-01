@@ -59,7 +59,32 @@ The server's `cron.update_mirrors` task must be enabled; otherwise the repositor
 
 ## 3. Install
 
-Choose the NixOS instructions below for a NixOS host. For other Linux distributions, the included systemd user service works on distributions using systemd. You need Python 3, its venv/pip support, and systemd. Install those packages with your distribution's package manager; for example:
+Choose the NixOS instructions below for a NixOS host. On other Linux distributions, use the installer for a system service or follow the manual user-service instructions. The repository includes `.env.example`, `requirements.txt`, and systemd service/timer units.
+
+### Non-NixOS Linux installer
+
+On a systemd-based Debian/Ubuntu, Fedora, or Arch Linux machine, the interactive installer can install the Python dependencies, configure the service account and systemd timer, and prompt for the required accounts and tokens:
+
+```bash
+git clone https://github.com/VijetHegde604/forgejo-mirror.git
+cd forgejo-mirror
+sudo ./scripts/install.sh
+```
+
+Token input is hidden while you type. The installer writes credentials to `/etc/github-forgejo-mirror.env` with root-only permissions, installs the application under `/opt/github-forgejo-mirror`, and enables a system timer. It asks before installing OS packages and before proceeding with an HTTP Forgejo URL. HTTP requires explicit confirmation and is intended only for a trusted private network. The timer starts the job five minutes after boot and repeats every 15 minutes. The installer supports apt, dnf, and pacman; it requires systemd and does not support NixOS.
+
+After installation, check the timer and logs with:
+
+```bash
+systemctl status github-forgejo-mirror.timer
+journalctl -u github-forgejo-mirror.service -n 100 --no-pager
+```
+
+To change credentials, rerun `sudo ./scripts/install.sh` from the checkout and enter the updated values. This replaces the environment file and refreshes the installed script and service units.
+
+### Manual user-service installation
+
+For a manual setup, install Python 3, venv/pip support, and systemd with your distribution's package manager. For example:
 
 ```bash
 # Debian or Ubuntu
@@ -72,7 +97,7 @@ sudo dnf install python3 python3-pip
 sudo pacman -S python python-pip
 ```
 
-The repository includes `.env.example`, `requirements.txt`, and systemd service/timer units. Run these commands from a checkout of this repository:
+Then run these commands from a checkout of this repository:
 
 ```bash
 mkdir -p ~/.local/opt ~/.config ~/.local/state/github-forgejo-mirror
@@ -145,28 +170,72 @@ systemctl --user start github-forgejo-mirror.service
 
 ### NixOS
 
-The module at `nix/module.nix` builds the script with its Python dependency, runs it as a restricted dynamic user, stores its lock under `/var/lib/github-forgejo-mirror`, and schedules it with a persistent systemd timer. Keep this repository at a stable path available when evaluating your NixOS configuration, or copy `nix/module.nix` into your configuration repository. Import it and enable the service (adjust the path to this checkout):
+The flake provides a package and a NixOS module. The module runs the mirror job as a restricted dynamic user, keeps its lock/state in `/var/lib/github-forgejo-mirror`, and installs a persistent systemd timer. It builds Python and the `requests` dependency for you.
+
+#### Add the flake to a NixOS configuration
+
+This example shows the relevant parts of a complete `/etc/nixos/flake.nix`. If you already have a flake, add the `forgejo-mirror` input and module to your existing host instead of replacing your file:
 
 ```nix
 {
-  imports = [ /path/to/github-forgejo-mirror/nix/module.nix ];
+  description = "NixOS configuration";
 
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    forgejo-mirror.url = "github:VijetHegde604/forgejo-mirror";
+  };
+
+  outputs = { self, nixpkgs, forgejo-mirror, ... }: {
+    nixosConfigurations.nix-server = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        forgejo-mirror.nixosModules.default
+        ./configuration.nix
+      ];
+    };
+  };
+}
+```
+
+Replace `nix-server` with the host name you want to use after `#` in the rebuild command. Use `aarch64-linux` for a 64-bit ARM host. The first flake evaluation creates `flake.lock`, which records the exact nixpkgs and application revisions used by your system.
+
+#### Configure the service
+
+Add this to the NixOS module used above, commonly `/etc/nixos/configuration.nix`:
+
+```nix
+{ ... }:
+{
   services.github-forgejo-mirror = {
     enable = true;
     environmentFile = "/etc/github-forgejo-mirror.env";
+
+    # How often this program discovers repos and reconciles their settings.
     interval = "15m";
   };
 }
 ```
 
-You can manage this environment file yourself without a secrets manager. Create it directly on the machine, outside the Nix configuration and Nix store:
+The available module options are:
+
+| Option | Default | Purpose |
+|---|---|---|
+| `services.github-forgejo-mirror.enable` | `false` | Installs and enables the systemd service and timer. |
+| `services.github-forgejo-mirror.environmentFile` | `/run/secrets/github-forgejo-mirror.env` | Absolute path to a systemd `EnvironmentFile` with credentials and optional settings. |
+| `services.github-forgejo-mirror.interval` | `15m` | How often the systemd timer runs the discovery job. |
+
+`interval` controls when this program runs. The separate `MIRROR_INTERVAL` environment variable controls how frequently Forgejo pulls updates for each repository; that value must meet the Forgejo server's configured minimum mirror interval. The systemd timer runs five minutes after boot and then at the configured `interval`.
+
+#### Supply the environment variables
+
+For a machine without a secret manager, create the environment file directly on the host so the tokens stay out of the Nix store:
 
 ```bash
 sudo install -o root -g root -m 600 /dev/null /etc/github-forgejo-mirror.env
 sudoedit /etc/github-forgejo-mirror.env
 ```
 
-Add the required variables as plain `KEY=value` lines. For example, with the HTTP Forgejo instance at `nix-server:3001`:
+Add the required values as plain `KEY=value` lines. For the Forgejo server at `http://nix-server:3001`, the minimum file is:
 
 ```ini
 GITHUB_USERNAME=your-github-login
@@ -177,11 +246,46 @@ FORGEJO_USERNAME=your-forgejo-login
 FORGEJO_TOKEN=your-forgejo-token
 ```
 
-Use `https://` for `FORGEJO_URL` when your instance supports HTTPS; `ALLOW_INSECURE_FORGEJO=true` is needed only for an HTTP URL on a trusted private network. Do not append `/api/v1` to `FORGEJO_URL`. `EnvironmentFile` does not support shell expansion. Keep the file owned by root with mode `600`; systemd reads it before starting the restricted service. The module sets `STATE_DIR` to its managed state directory, so leave `STATE_DIR` out of this file.
+For a public or otherwise TLS-enabled instance, use `FORGEJO_URL=https://forgejo.example.com` and omit `ALLOW_INSECURE_FORGEJO`. HTTP is rejected by default; set `ALLOW_INSECURE_FORGEJO=true` only when using HTTP on a trusted private network. `FORGEJO_URL` is the base address and must not include `/api/v1`.
 
-You can also put values directly in NixOS configuration, but any tokens written there can become readable in the Nix store or through system configuration outputs. The manually created `/etc` file above keeps token values out of the store. A secrets manager such as agenix or sops-nix is another option if you want the file provisioned declaratively.
+Optional settings can go in the same file. For example:
 
-Apply the configuration with `sudo nixos-rebuild switch`. Verify the timer and run the job once manually if desired:
+```ini
+GITHUB_API_URL=https://api.github.com
+MIRROR_INTERVAL=15m
+MIRROR_VISIBILITY=private
+MIRROR_LFS=true
+REQUEST_TIMEOUT_SECONDS=30
+MIGRATION_TIMEOUT_SECONDS=3600
+DRY_RUN=true
+LOG_LEVEL=INFO
+```
+
+Remove `DRY_RUN=true` or change it to `false` after checking connectivity; while true, the job reports planned mirror creation without creating repositories. `MIRROR_VISIBILITY` accepts `private` or `preserve`. `EnvironmentFile` uses plain systemd `KEY=value` syntax, not shell syntax, so do not use `export`, shell expansion, or source the file. Keep it owned by root with mode `600`; systemd reads it before starting the restricted service. The module sets `STATE_DIR` itself, so do not add `STATE_DIR` to this file.
+
+Putting tokens directly in NixOS configuration or `environment.etc.<name>.text` can expose them through the Nix store or system configuration outputs. The manually created `/etc` file above avoids storing tokens in the Nix store. A secrets manager such as agenix or sops-nix can provision the same environment file declaratively if desired.
+
+#### Apply and operate the configuration
+
+If flakes are not enabled on the host yet, add this setting to your NixOS configuration and apply it using your current rebuild method:
+
+```nix
+nix.settings.experimental-features = [ "nix-command" "flakes" ];
+```
+
+For a host that is not already using flakes, first apply that setting with the traditional command:
+
+```bash
+sudo nixos-rebuild switch
+```
+
+Before activating the service for the first time, set `DRY_RUN=true` in `/etc/github-forgejo-mirror.env` so its initial scheduled run only checks credentials and reports planned changes. Then build and activate the flake (replace `nix-server` with the host attribute under `nixosConfigurations`):
+
+```bash
+sudo nixos-rebuild switch --flake /etc/nixos#nix-server
+```
+
+Check the timer and run the service manually to inspect the result:
 
 ```bash
 systemctl status github-forgejo-mirror.timer
@@ -189,7 +293,16 @@ sudo systemctl start github-forgejo-mirror.service
 journalctl -u github-forgejo-mirror.service -n 100 --no-pager
 ```
 
-To check credentials and connectivity before provisioning mirrors, temporarily set `DRY_RUN=true` in the secret environment file, start the service, then remove that setting and start it again for the real run.
+With `DRY_RUN=true`, start the service and review its logs to validate credentials and connectivity without creating mirrors. Once that looks right, remove the setting (or set it to `false`) and start the service again to create any missing mirrors.
+
+The flake also exposes a standalone package for systems that do not use the NixOS module:
+
+```bash
+nix profile install github:VijetHegde604/forgejo-mirror
+nix run github:VijetHegde604/forgejo-mirror -- --help
+```
+
+The standalone package still needs the required environment variables supplied by its caller; use the module when you want NixOS to configure the scheduled service.
 
 ## Configuration reference
 
