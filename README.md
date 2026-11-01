@@ -153,13 +153,33 @@ The module at `nix/module.nix` builds the script with its Python dependency, run
 
   services.github-forgejo-mirror = {
     enable = true;
-    environmentFile = "/run/secrets/github-forgejo-mirror.env";
+    environmentFile = "/etc/github-forgejo-mirror.env";
     interval = "15m";
   };
 }
 ```
 
-Create the environment file through a secrets manager such as agenix or sops-nix. It must be available at the configured path at service start and readable by the systemd service manager. Put the required variables from `.env.example` in it as plain `KEY=value` lines; `EnvironmentFile` does not support shell expansion. Keep the secret out of the Nix store. The module sets `STATE_DIR` to its managed state directory, so leave `STATE_DIR` out of the secret file.
+You can manage this environment file yourself without a secrets manager. Create it directly on the machine, outside the Nix configuration and Nix store:
+
+```bash
+sudo install -o root -g root -m 600 /dev/null /etc/github-forgejo-mirror.env
+sudoedit /etc/github-forgejo-mirror.env
+```
+
+Add the required variables as plain `KEY=value` lines. For example, with the HTTP Forgejo instance at `nix-server:3001`:
+
+```ini
+GITHUB_USERNAME=your-github-login
+GITHUB_TOKEN=your-github-token
+FORGEJO_URL=http://nix-server:3001
+ALLOW_INSECURE_FORGEJO=true
+FORGEJO_USERNAME=your-forgejo-login
+FORGEJO_TOKEN=your-forgejo-token
+```
+
+Use `https://` for `FORGEJO_URL` when your instance supports HTTPS; `ALLOW_INSECURE_FORGEJO=true` is needed only for an HTTP URL on a trusted private network. Do not append `/api/v1` to `FORGEJO_URL`. `EnvironmentFile` does not support shell expansion. Keep the file owned by root with mode `600`; systemd reads it before starting the restricted service. The module sets `STATE_DIR` to its managed state directory, so leave `STATE_DIR` out of this file.
+
+You can also put values directly in NixOS configuration, but any tokens written there can become readable in the Nix store or through system configuration outputs. The manually created `/etc` file above keeps token values out of the store. A secrets manager such as agenix or sops-nix is another option if you want the file provisioned declaratively.
 
 Apply the configuration with `sudo nixos-rebuild switch`. Verify the timer and run the job once manually if desired:
 
