@@ -1,0 +1,11 @@
+[Unit]
+Description=Run GitHub to Forgejo mirror discovery periodically
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=15m
+Persistent=true
+Unit=github-forgejo-mirror.service
+
+[Install]
+WantedBy=timers.target

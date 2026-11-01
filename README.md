@@ -59,11 +59,24 @@ The server's `cron.update_mirrors` task must be enabled; otherwise the repositor
 
 ## 3. Install
 
-Example for a Linux system using a systemd **user** service:
+Choose the NixOS instructions below for a NixOS host. For other Linux distributions, the included systemd user service works on distributions using systemd. You need Python 3, its venv/pip support, and systemd. Install those packages with your distribution's package manager; for example:
+
+```bash
+# Debian or Ubuntu
+sudo apt install python3 python3-venv python3-pip
+
+# Fedora
+sudo dnf install python3 python3-pip
+
+# Arch Linux
+sudo pacman -S python python-pip
+```
+
+The repository includes `.env.example`, `requirements.txt`, and systemd service/timer units. Run these commands from a checkout of this repository:
 
 ```bash
 mkdir -p ~/.local/opt ~/.config ~/.local/state/github-forgejo-mirror
-cp -a github-forgejo-mirror ~/.local/opt/
+cp -a . ~/.local/opt/github-forgejo-mirror/
 cd ~/.local/opt/github-forgejo-mirror
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
@@ -74,7 +87,7 @@ $EDITOR ~/.config/github-forgejo-mirror.env
 chmod 600 ~/.config/github-forgejo-mirror.env
 ```
 
-Update `STATE_DIR` in the environment file to your actual home directory, or remove it to use the script's default `~/.local/state/github-forgejo-mirror`.
+Edit the copied environment file and replace the placeholder credentials and account names. Keep the file private (`chmod 600`). With `STATE_DIR` omitted, the script uses `~/.local/state/github-forgejo-mirror` for this user service.
 
 Install and enable the timer:
 
@@ -84,7 +97,7 @@ cp github-forgejo-mirror.service github-forgejo-mirror.timer ~/.config/systemd/u
 systemctl --user daemon-reload
 ```
 
-The unit's `WorkingDirectory` and `ExecStart` assume the project is at `~/.local/opt/github-forgejo-mirror`, as in the install commands above.
+The unit's `WorkingDirectory` and `ExecStart` assume the project is at `~/.local/opt/github-forgejo-mirror`, as in the install commands above. If your distribution does not use systemd, install Python and its venv support the same way, then schedule `~/.local/opt/github-forgejo-mirror/.venv/bin/python ~/.local/opt/github-forgejo-mirror/github_forgejo_mirror.py` with its native scheduler (for example, cron). Ensure that scheduler receives the required variables from the environment file; a systemd `EnvironmentFile` is not a shell script.
 
 ## 4. Test safely, then enable
 
@@ -129,6 +142,34 @@ Run immediately on demand:
 ```bash
 systemctl --user start github-forgejo-mirror.service
 ```
+
+### NixOS
+
+The module at `nix/module.nix` builds the script with its Python dependency, runs it as a restricted dynamic user, stores its lock under `/var/lib/github-forgejo-mirror`, and schedules it with a persistent systemd timer. Keep this repository at a stable path available when evaluating your NixOS configuration, or copy `nix/module.nix` into your configuration repository. Import it and enable the service (adjust the path to this checkout):
+
+```nix
+{
+  imports = [ /path/to/github-forgejo-mirror/nix/module.nix ];
+
+  services.github-forgejo-mirror = {
+    enable = true;
+    environmentFile = "/run/secrets/github-forgejo-mirror.env";
+    interval = "15m";
+  };
+}
+```
+
+Create the environment file through a secrets manager such as agenix or sops-nix. It must be available at the configured path at service start and readable by the systemd service manager. Put the required variables from `.env.example` in it as plain `KEY=value` lines; `EnvironmentFile` does not support shell expansion. Keep the secret out of the Nix store. The module sets `STATE_DIR` to its managed state directory, so leave `STATE_DIR` out of the secret file.
+
+Apply the configuration with `sudo nixos-rebuild switch`. Verify the timer and run the job once manually if desired:
+
+```bash
+systemctl status github-forgejo-mirror.timer
+sudo systemctl start github-forgejo-mirror.service
+journalctl -u github-forgejo-mirror.service -n 100 --no-pager
+```
+
+To check credentials and connectivity before provisioning mirrors, temporarily set `DRY_RUN=true` in the secret environment file, start the service, then remove that setting and start it again for the real run.
 
 ## Configuration reference
 
